@@ -75,6 +75,21 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
+          # The pinned upstream source uses a UIKit 19-only convenience property,
+          # but the Xcode 16.4 runner SDK is UIKit 18.5. Remove only that optional
+          # visual tweak when the SDK does not provide it.
+          ui_file = Path("Natives/LauncherProfilesViewController.m")
+          ui_source = ui_file.read_text()
+          ui_source = ui_source.replace(
+              "    if(@available(iOS 19.0, *)) {\n"
+              "        self.createButtonItem.sharesBackground = NO;\n"
+              "    }\n",
+              ""
+          )
+          ui_file.write_text(ui_source)
+
+          # Include Mach declarations required by the JIT exception-port path.
           p = Path("Natives/JavaLauncher.m")
           s = p.read_text()
           anchor = '#include <unistd.h>\n'
@@ -84,10 +99,10 @@ jobs:
                   raise SystemExit("Could not locate include insertion point in Natives/JavaLauncher.m")
               s = s.replace(anchor, anchor + needed, 1)
               p.write_text(s)
-          print("Mach headers present:")
-          for line in p.read_text().splitlines():
-              if "mach/mach" in line or "mach/task" in line:
-                  print(line)
+
+          assert "sharesBackground" not in ui_file.read_text()
+          assert "mach/mach.h" in p.read_text()
+          print("Applied SDK compatibility patch and Mach declarations.")
           PY
 
       - name: Build standard iOS IPA
