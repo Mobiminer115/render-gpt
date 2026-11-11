@@ -2,11 +2,12 @@ name: Build Amethyst iOS on GitHub macOS
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - "feat/**"
   pull_request:
+    types: [opened, reopened, synchronize]
+
+concurrency:
+  group: amethyst-ios-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
