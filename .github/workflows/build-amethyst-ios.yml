@@ -11,7 +11,7 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write
+
 
 jobs:
   build-ios:
@@ -70,6 +70,26 @@ jobs:
           cmake --version
           mkdir -p "$RUNNER_TEMP/amethyst-logs"
 
+      - name: Patch missing Mach headers in upstream checkout
+        working-directory: amethyst
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("Natives/JavaLauncher.m")
+          s = p.read_text()
+          anchor = '#include <unistd.h>\n'
+          needed = '#include <mach/mach.h>\n#include <mach/mach_init.h>\n#include <mach/task.h>\n'
+          if needed not in s:
+              if anchor not in s:
+                  raise SystemExit("Could not locate include insertion point in Natives/JavaLauncher.m")
+              s = s.replace(anchor, anchor + needed, 1)
+              p.write_text(s)
+          print("Mach headers present:")
+          for line in p.read_text().splitlines():
+              if "mach/mach" in line or "mach/task" in line:
+                  print(line)
+          PY
+
       - name: Build standard iOS IPA
         id: build-standard
         working-directory: amethyst
@@ -110,8 +130,21 @@ jobs:
               echo "--- $f"
               tail -n 120 "$f"
             done
+            echo "=== Compiler failures ==="
+            grep -R -n -E "error:|fatal error:|undefined reference|ld: error" "$RUNNER_TEMP/amethyst-logs" 2>/dev/null || true
           } > "$RUNNER_TEMP/amethyst-logs/diagnostics.txt" 2>&1
           cat "$RUNNER_TEMP/amethyst-logs/diagnostics.txt"
+          {
+            echo "## Amethyst CI failure report"
+            echo ""
+            echo "- Run: [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Standard IPA: ${{ steps.build-standard.outcome || 'not-run' }}"
+            echo "- TrollStore TIPA: ${{ steps.build-trollstore.outcome || 'not-run' }}"
+            echo ""
+            echo "### Compiler errors"
+            grep -R -n -E "error:|fatal error:|undefined reference|ld: error" "$RUNNER_TEMP/amethyst-logs" 2>/dev/null | tail -n 60 || true
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload CI diagnostics (always)
         if: always()
