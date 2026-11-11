@@ -89,7 +89,7 @@ jobs:
           )
           ui_file.write_text(ui_source)
 
-          # Include Mach declarations required by the JIT exception-port path.
+          # Add Mach declarations required by the JIT exception-port path.
           p = Path("Natives/JavaLauncher.m")
           s = p.read_text()
           anchor = '#include <unistd.h>\n'
@@ -100,9 +100,48 @@ jobs:
               s = s.replace(anchor, anchor + needed, 1)
               p.write_text(s)
 
+          # Resolve UIKit's optional private Liquid Glass capability dynamically.
+          # This avoids a hard link dependency when building against older SDKs.
+          hook_h = Path("Natives/UIKit+hook.h")
+          header = hook_h.read_text()
+          old_decl = 'extern BOOL _UISolariumEnabled(void) __attribute__((weak_import));'
+          if old_decl not in header and 'BOOL isUISolariumEnabled(void);' not in header:
+              raise SystemExit("Could not find the UISolariumEnabled declaration in UIKit+hook.h")
+          header = header.replace(old_decl, 'BOOL isUISolariumEnabled(void);')
+          hook_h.write_text(header)
+
+          hook_m = Path("Natives/UIKit+hook.m")
+          impl = hook_m.read_text()
+          if '#import <dlfcn.h>' not in impl:
+              impl = impl.replace('#import <UIKit/UIKit.h>', '#import <UIKit/UIKit.h>\n#import <dlfcn.h>', 1)
+          helper = '''
+          typedef BOOL (*UISolariumEnabledFunction)(void);
+
+          BOOL isUISolariumEnabled(void) {
+              static dispatch_once_t onceToken;
+              static UISolariumEnabledFunction enabledFunction = NULL;
+              dispatch_once(&onceToken, ^{
+                  enabledFunction = (UISolariumEnabledFunction)dlsym(RTLD_DEFAULT, "_UISolariumEnabled");
+              });
+              return enabledFunction ? enabledFunction() : NO;
+          }
+          '''
+          if 'BOOL isUISolariumEnabled(void)' not in impl:
+              impl = impl.replace('__weak UIWindow *mainWindow, *externalWindow;\n',
+                                  '__weak UIWindow *mainWindow, *externalWindow;\n' + helper, 1)
+          hook_m.write_text(impl)
+
+          for rel in ("Natives/LauncherNavigationController.m", "Natives/PickTextField.m"):
+              source_file = Path(rel)
+              source = source_file.read_text()
+              source = source.replace('_UISolariumEnabled && _UISolariumEnabled()', 'isUISolariumEnabled()')
+              source_file.write_text(source)
+
           assert "sharesBackground" not in ui_file.read_text()
           assert "mach/mach.h" in p.read_text()
-          print("Applied SDK compatibility patch and Mach declarations.")
+          assert '_UISolariumEnabled && _UISolariumEnabled()' not in Path("Natives/LauncherNavigationController.m").read_text()
+          assert '_UISolariumEnabled && _UISolariumEnabled()' not in Path("Natives/PickTextField.m").read_text()
+          print("Applied UIKit 18 compatibility, Mach headers, and dynamic UIKit capability lookup.")
           PY
 
       - name: Build standard iOS IPA
