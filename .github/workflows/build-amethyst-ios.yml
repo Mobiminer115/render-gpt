@@ -1,0 +1,86 @@
+name: Build Amethyst iOS on GitHub macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "feat/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    name: Build iOS IPA (unsigned, GitHub-hosted macOS)
+    runs-on: macos-14
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout renderer workspace
+        uses: actions/checkout@v4
+
+      - name: Checkout Amethyst iOS source
+        uses: actions/checkout@v4
+        with:
+          repository: AngelAuraMC/Amethyst-iOS
+          ref: f98c4133c72d39e06ceac42b57cc4477c52105fc
+          path: amethyst
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Install build tools
+        run: |
+          brew update
+          brew install cmake ldid make
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Set up Java 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+          architecture: x64
+
+      - name: Verify toolchain
+        working-directory: amethyst
+        run: |
+          echo "BOOTJDK=$JAVA_HOME/bin" >> "$GITHUB_ENV"
+          command -v gmake
+          command -v cmake
+          command -v ldid
+          "$JAVA_HOME/bin/javac" -version
+          test -f Makefile
+          test -d Amethyst.xcodeproj
+
+      - name: Build standard iOS IPA
+        working-directory: amethyst
+        env:
+          SLIMMED: "0"
+        run: |
+          gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=2
+
+      - name: Build TrollStore-entitled TIPA
+        working-directory: amethyst
+        env:
+          SLIMMED: "0"
+        run: |
+          gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=2 TROLLSTORE_JIT_ENT=1
+
+      - name: Upload iOS build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: amethyst-ios-baseline-${{ github.run_number }}
+          path: |
+            amethyst/artifacts/*.ipa
+            amethyst/artifacts/*.tipa
+            amethyst/artifacts/AngelAuraAmethyst.dSYM
+          if-no-files-found: error
+          retention-days: 14
