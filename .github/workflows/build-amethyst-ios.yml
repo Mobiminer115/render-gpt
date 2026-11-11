@@ -51,7 +51,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "8"
-          architecture: aarch64
+          architecture: x64
 
       - name: Verify toolchain
         working-directory: amethyst
@@ -61,8 +61,11 @@ jobs:
           command -v cmake
           command -v ldid
           "$JAVA_HOME/bin/javac" -version
+          "$JAVA_HOME/bin/java" -version
           test -f Makefile
           test -d Amethyst.xcodeproj
+          uname -m
+          cmake --version
 
       - name: Build standard iOS IPA
         working-directory: amethyst
@@ -77,6 +80,24 @@ jobs:
           SLIMMED: "0"
         run: |
           gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=2 TROLLSTORE_JIT_ENT=1
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        working-directory: amethyst
+        run: |
+          echo "=== Toolchain ==="
+          uname -a || true
+          xcodebuild -version || true
+          cmake --version || true
+          gmake --version || true
+          java -version || true
+          echo "=== Build outputs ==="
+          find artifacts -maxdepth 3 -type f -print 2>/dev/null || true
+          echo "=== Recent build files ==="
+          find Natives/build -maxdepth 2 -type f -name 'CMakeError.log' -o -name 'CMakeOutput.log' 2>/dev/null | while read f; do
+            echo "--- $f"
+            tail -n 100 "$f"
+          done
 
       - name: Upload iOS build artifacts
         uses: actions/upload-artifact@v4
