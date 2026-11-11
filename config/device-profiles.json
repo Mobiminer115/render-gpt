@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "policy": {
+    "selection": "capability-based",
+    "adaptiveQuality": true,
+    "hysteresisSeconds": 8,
+    "minimumRenderScale": 0.5,
+    "maximumRenderScale": 1.0,
+    "neverChangeGameSemantics": true
+  },
+  "profiles": {
+    "legacy-minimum": {
+      "description": "Compatibility floor; validate on iPhone 6s Plus hardware.",
+      "renderScale": 0.65,
+      "viewDistanceChunks": 5,
+      "chunkUploadBudgetPerFrame": 1,
+      "mipmapLevels": 2,
+      "anisotropicFiltering": 1,
+      "targetFrameRate": 30,
+      "memoryCacheBudgetMiB": 96
+    },
+    "balanced": {
+      "description": "Intermediate devices; choose only after capability checks.",
+      "renderScale": 0.8,
+      "viewDistanceChunks": 8,
+      "chunkUploadBudgetPerFrame": 2,
+      "mipmapLevels": 4,
+      "anisotropicFiltering": 2,
+      "targetFrameRate": 60,
+      "memoryCacheBudgetMiB": 192
+    },
+    "modern": {
+      "description": "Recent devices; still respect thermal and memory signals.",
+      "renderScale": 1.0,
+      "viewDistanceChunks": 12,
+      "chunkUploadBudgetPerFrame": 4,
+      "mipmapLevels": 4,
+      "anisotropicFiltering": 4,
+      "targetFrameRate": 60,
+      "memoryCacheBudgetMiB": 384
+    }
+  },
+  "notes": [
+    "These are starting defaults, not benchmark-derived guarantees.",
+    "Memory budgets are policy limits for this renderer's caches, not total app memory.",
+    "The launcher must clamp settings to actual device and backend capabilities."
+  ]
+}
