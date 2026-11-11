@@ -11,10 +11,11 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   build-ios:
-    name: Build iOS IPA (unsigned, GitHub-hosted macOS)
+    name: Build iOS IPA (GitHub-hosted macOS)
     runs-on: macos-15
     timeout-minutes: 180
 
@@ -39,7 +40,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          # GitHub's macos-15 ARM64 image already includes CMake.
+          # macos-15 ARM64 images include CMake; use prebuilt Homebrew bottles.
           cmake --version
           brew install --force-bottle ldid make
           echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
@@ -54,6 +55,7 @@ jobs:
           architecture: x64
 
       - name: Verify toolchain
+        id: verify-toolchain
         working-directory: amethyst
         run: |
           echo "BOOTJDK=$JAVA_HOME/bin" >> "$GITHUB_ENV"
@@ -66,40 +68,62 @@ jobs:
           test -d Amethyst.xcodeproj
           uname -m
           cmake --version
+          mkdir -p "$RUNNER_TEMP/amethyst-logs"
 
       - name: Build standard iOS IPA
+        id: build-standard
         working-directory: amethyst
         env:
           SLIMMED: "0"
         run: |
-          gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=2
+          set -o pipefail
+          gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=2 2>&1 | tee "$RUNNER_TEMP/amethyst-logs/standard-ipa.log"
 
       - name: Build TrollStore-entitled TIPA
+        id: build-trollstore
         working-directory: amethyst
         env:
           SLIMMED: "0"
         run: |
-          gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=2 TROLLSTORE_JIT_ENT=1
+          set -o pipefail
+          gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=2 TROLLSTORE_JIT_ENT=1 2>&1 | tee "$RUNNER_TEMP/amethyst-logs/trollstore-tipa.log"
 
       - name: Collect diagnostics on failure
         if: failure()
         working-directory: amethyst
         run: |
-          echo "=== Toolchain ==="
-          uname -a || true
-          xcodebuild -version || true
-          cmake --version || true
-          gmake --version || true
-          java -version || true
-          echo "=== Build outputs ==="
-          find artifacts -maxdepth 3 -type f -print 2>/dev/null || true
-          echo "=== Recent build files ==="
-          find Natives/build -maxdepth 2 -type f -name 'CMakeError.log' -o -name 'CMakeOutput.log' 2>/dev/null | while read f; do
-            echo "--- $f"
-            tail -n 100 "$f"
-          done
+          {
+            echo "=== Runner ==="
+            uname -a || true
+            echo "=== Xcode ==="
+            xcodebuild -version || true
+            echo "=== CMake ==="
+            cmake --version || true
+            echo "=== GNU Make ==="
+            gmake --version || true
+            echo "=== Java ==="
+            java -version || true
+            echo "=== Build outputs ==="
+            find artifacts -maxdepth 3 -type f -print 2>/dev/null || true
+            echo "=== CMake diagnostics ==="
+            find Natives/build -type f \( -name 'CMakeError.log' -o -name 'CMakeOutput.log' \) 2>/dev/null | while read -r f; do
+              echo "--- $f"
+              tail -n 120 "$f"
+            done
+          } > "$RUNNER_TEMP/amethyst-logs/diagnostics.txt" 2>&1
+          cat "$RUNNER_TEMP/amethyst-logs/diagnostics.txt"
 
-      - name: Upload iOS build artifacts
+      - name: Upload CI diagnostics (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: amethyst-ci-diagnostics-${{ github.run_number }}
+          path: ${{ runner.temp }}/amethyst-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload iOS packages
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: amethyst-ios-baseline-${{ github.run_number }}
@@ -109,3 +133,52 @@ jobs:
             amethyst/artifacts/AngelAuraAmethyst.dSYM
           if-no-files-found: error
           retention-days: 14
+
+      - name: Update PR with failure summary
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          STANDARD_STATUS: ${{ steps.build-standard.outcome || 'not-run' }}
+          TROLLSTORE_STATUS: ${{ steps.build-trollstore.outcome || 'not-run' }}
+          VERIFY_STATUS: ${{ steps.verify-toolchain.outcome || 'not-run' }}
+        with:
+          script: |
+            const marker = '<!-- render-gpt-amethyst-ci-status -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            if (!issue_number) {
+              core.info('No pull request context; skipping PR comment.');
+              return;
+            }
+            const details = [
+              `- Toolchain verification: **${process.env.VERIFY_STATUS}**`,
+              `- Standard IPA: **${process.env.STANDARD_STATUS}**`,
+              `- TrollStore TIPA: **${process.env.TROLLSTORE_STATUS}**`
+            ].join('\n');
+            const body = [
+              marker,
+              '## Amethyst iOS CI needs attention',
+              '',
+              'The automated macOS build failed. Diagnostics are attached to the workflow run when available.',
+              '',
+              details,
+              '',
+              `- [Open workflow run](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})`,
+              `- Commit: \`${context.sha.slice(0, 12)}\``,
+              `- Diagnostic artifact: \`amethyst-ci-diagnostics-${context.runNumber}\` (if upload succeeded)`,
+              '',
+              'The workflow will run again automatically after the next PR update.'
+            ].join('\n');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100
+            });
+            const existing = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body
+              });
+            }
