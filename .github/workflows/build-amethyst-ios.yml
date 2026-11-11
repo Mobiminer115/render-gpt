@@ -1,0 +1,227 @@
+name: Build Amethyst iOS on GitHub macOS
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+concurrency:
+  group: amethyst-ios-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+
+jobs:
+  build-ios:
+    name: Build iOS IPA (GitHub-hosted macOS)
+    runs-on: macos-15
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout renderer workspace
+        uses: actions/checkout@v4
+
+      - name: Checkout Amethyst iOS source
+        uses: actions/checkout@v4
+        with:
+          repository: AngelAuraMC/Amethyst-iOS
+          ref: f98c4133c72d39e06ceac42b57cc4477c52105fc
+          path: amethyst
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Install build tools
+        run: |
+          # macos-15 ARM64 images include CMake; use prebuilt Homebrew bottles.
+          cmake --version
+          brew install --force-bottle ldid make
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+          gmake --version
+          ldid -h >/dev/null 2>&1 || true
+
+      - name: Set up Java 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+          architecture: x64
+
+      - name: Verify toolchain
+        id: verify-toolchain
+        working-directory: amethyst
+        run: |
+          echo "BOOTJDK=$JAVA_HOME/bin" >> "$GITHUB_ENV"
+          command -v gmake
+          command -v cmake
+          command -v ldid
+          "$JAVA_HOME/bin/javac" -version
+          "$JAVA_HOME/bin/java" -version
+          test -f Makefile
+          test -d Amethyst.xcodeproj
+          uname -m
+          cmake --version
+          mkdir -p "$RUNNER_TEMP/amethyst-logs"
+
+      - name: Patch missing Mach headers in upstream checkout
+        working-directory: amethyst
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # The pinned upstream source uses a UIKit 19-only convenience property,
+          # but the Xcode 16.4 runner SDK is UIKit 18.5. Remove only that optional
+          # visual tweak when the SDK does not provide it.
+          ui_file = Path("Natives/LauncherProfilesViewController.m")
+          ui_source = ui_file.read_text()
+          ui_source = ui_source.replace(
+              "    if(@available(iOS 19.0, *)) {\n"
+              "        self.createButtonItem.sharesBackground = NO;\n"
+              "    }\n",
+              ""
+          )
+          ui_file.write_text(ui_source)
+
+          # Add Mach declarations required by the JIT exception-port path.
+          p = Path("Natives/JavaLauncher.m")
+          s = p.read_text()
+          anchor = '#include <unistd.h>\n'
+          needed = '#include <mach/mach.h>\n#include <mach/mach_init.h>\n#include <mach/task.h>\n'
+          if needed not in s:
+              if anchor not in s:
+                  raise SystemExit("Could not locate include insertion point in Natives/JavaLauncher.m")
+              s = s.replace(anchor, anchor + needed, 1)
+              p.write_text(s)
+
+          # Resolve UIKit's optional private Liquid Glass capability dynamically.
+          # This avoids a hard link dependency when building against older SDKs.
+          hook_h = Path("Natives/UIKit+hook.h")
+          header = hook_h.read_text()
+          old_decl = 'extern BOOL _UISolariumEnabled(void) __attribute__((weak_import));'
+          if old_decl not in header and 'BOOL isUISolariumEnabled(void);' not in header:
+              raise SystemExit("Could not find the UISolariumEnabled declaration in UIKit+hook.h")
+          header = header.replace(old_decl, 'BOOL isUISolariumEnabled(void);')
+          hook_h.write_text(header)
+
+          hook_m = Path("Natives/UIKit+hook.m")
+          impl = hook_m.read_text()
+          if '#import <dlfcn.h>' not in impl:
+              impl = impl.replace('#import <UIKit/UIKit.h>', '#import <UIKit/UIKit.h>\n#import <dlfcn.h>', 1)
+          helper = '''
+          typedef BOOL (*UISolariumEnabledFunction)(void);
+
+          BOOL isUISolariumEnabled(void) {
+              static dispatch_once_t onceToken;
+              static UISolariumEnabledFunction enabledFunction = NULL;
+              dispatch_once(&onceToken, ^{
+                  enabledFunction = (UISolariumEnabledFunction)dlsym(RTLD_DEFAULT, "_UISolariumEnabled");
+              });
+              return enabledFunction ? enabledFunction() : NO;
+          }
+          '''
+          if 'BOOL isUISolariumEnabled(void)' not in impl:
+              impl = impl.replace('__weak UIWindow *mainWindow, *externalWindow;\n',
+                                  '__weak UIWindow *mainWindow, *externalWindow;\n' + helper, 1)
+          hook_m.write_text(impl)
+
+          for rel in ("Natives/LauncherNavigationController.m", "Natives/PickTextField.m"):
+              source_file = Path(rel)
+              source = source_file.read_text()
+              source = source.replace('_UISolariumEnabled && _UISolariumEnabled()', 'isUISolariumEnabled()')
+              source_file.write_text(source)
+
+          assert "sharesBackground" not in ui_file.read_text()
+          assert "mach/mach.h" in p.read_text()
+          assert '_UISolariumEnabled && _UISolariumEnabled()' not in Path("Natives/LauncherNavigationController.m").read_text()
+          assert '_UISolariumEnabled && _UISolariumEnabled()' not in Path("Natives/PickTextField.m").read_text()
+          print("Applied UIKit 18 compatibility, Mach headers, and dynamic UIKit capability lookup.")
+          PY
+
+      - name: Build standard iOS IPA
+        id: build-standard
+        working-directory: amethyst
+        env:
+          SLIMMED: "0"
+        run: |
+          set -o pipefail
+          gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=2 2>&1 | tee "$RUNNER_TEMP/amethyst-logs/standard-ipa.log"
+
+      - name: Build TrollStore-entitled TIPA
+        id: build-trollstore
+        working-directory: amethyst
+        env:
+          SLIMMED: "0"
+        run: |
+          set -o pipefail
+          gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=2 TROLLSTORE_JIT_ENT=1 2>&1 | tee "$RUNNER_TEMP/amethyst-logs/trollstore-tipa.log"
+
+      - name: Verify renderer backends in packaged IPA and TIPA
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 scripts/verify-renderer-package.py amethyst/artifacts/Payload/AngelAuraAmethyst.app
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        working-directory: amethyst
+        run: |
+          {
+            echo "=== Runner ==="
+            uname -a || true
+            echo "=== Xcode ==="
+            xcodebuild -version || true
+            echo "=== CMake ==="
+            cmake --version || true
+            echo "=== GNU Make ==="
+            gmake --version || true
+            echo "=== Java ==="
+            java -version || true
+            echo "=== Build outputs ==="
+            find artifacts -maxdepth 3 -type f -print 2>/dev/null || true
+            echo "=== CMake diagnostics ==="
+            find Natives/build -type f \( -name 'CMakeError.log' -o -name 'CMakeOutput.log' \) 2>/dev/null | while read -r f; do
+              echo "--- $f"
+              tail -n 120 "$f"
+            done
+            echo "=== Compiler failures ==="
+            grep -R -n -E "error:|fatal error:|undefined reference|ld: error" "$RUNNER_TEMP/amethyst-logs" 2>/dev/null || true
+          } > "$RUNNER_TEMP/amethyst-logs/diagnostics.txt" 2>&1
+          cat "$RUNNER_TEMP/amethyst-logs/diagnostics.txt"
+          {
+            echo "## Amethyst CI failure report"
+            echo ""
+            echo "- Run: [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Standard IPA: ${{ steps.build-standard.outcome || 'not-run' }}"
+            echo "- TrollStore TIPA: ${{ steps.build-trollstore.outcome || 'not-run' }}"
+            echo ""
+            echo "### Compiler errors"
+            grep -R -n -E "error:|fatal error:|undefined reference|ld: error" "$RUNNER_TEMP/amethyst-logs" 2>/dev/null | tail -n 60 || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CI diagnostics (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: amethyst-ci-diagnostics-${{ github.run_number }}
+          path: ${{ runner.temp }}/amethyst-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload iOS packages
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: amethyst-ios-baseline-${{ github.run_number }}
+          path: |
+            amethyst/artifacts/*.ipa
+            amethyst/artifacts/*.tipa
+            amethyst/artifacts/AngelAuraAmethyst.dSYM
+          if-no-files-found: error
+          retention-days: 14
