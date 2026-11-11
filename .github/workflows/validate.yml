@@ -1,0 +1,20 @@
+name: Validate renderer foundation
+
+on:
+  push:
+    branches: ["main", "feat/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate device profiles
+        run: python3 -m json.tool config/device-profiles.json > /dev/null
+      - name: Check required documentation
+        run: |
+          test -s README.md
+          test -s docs/architecture.md
+          test -s docs/build-and-test.md
