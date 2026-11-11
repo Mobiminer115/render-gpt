@@ -3,6 +3,7 @@
 from pathlib import Path
 import plistlib
 import sys
+import zipfile
 
 root = Path(sys.argv[1] if len(sys.argv) > 1 else "artifacts/Payload/AngelAuraAmethyst.app")
 frameworks = root / "Frameworks"
@@ -36,6 +37,27 @@ if info.is_file():
     print(f"INFO bundle={plist.get('CFBundleIdentifier')} version={plist.get('CFBundleShortVersionString')}")
 else:
     print(f"FAIL Info.plist missing: {info}")
+    failed = True
+
+packages = list(Path("amethyst/artifacts").glob("*.ipa")) + list(Path("amethyst/artifacts").glob("*.tipa"))
+for package in packages:
+    try:
+        with zipfile.ZipFile(package) as archive:
+            names = set(archive.namelist())
+            required = "Payload/AngelAuraAmethyst.app/Frameworks/libmobileglues.dylib"
+            if required not in names:
+                print(f"FAIL {package.name} does not contain {required}")
+                failed = True
+            else:
+                print(f"PASS {package.name} contains MobileGlues backend")
+    except zipfile.BadZipFile:
+        print(f"FAIL invalid package archive: {package}")
+        failed = True
+if not any(p.suffix == ".ipa" for p in packages):
+    print("FAIL standard IPA package missing")
+    failed = True
+if not any(p.suffix == ".tipa" for p in packages):
+    print("FAIL TrollStore TIPA package missing")
     failed = True
 
 if failed:
